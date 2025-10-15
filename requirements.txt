@@ -1,0 +1,19 @@
+# Core AI & Logic Libraries
+# LangChain for orchestrating AI agents and prompts
+langchain==0.1.20
+# OpenAI client for interfacing with their models
+langchain-openai==0.1.6
+# Pydantic for robust data validation and settings management
+pydantic==2.7.1
+
+# Web Scraping & HTTP Requests
+# Requests for making simple and reliable HTTP calls
+requests==2.31.0
+# BeautifulSoup4 for parsing HTML and XML documents efficiently
+beautifulsoup4==4.12.3
+
+# Environment & Configuration Management
+# Python-dotenv for loading environment variables from a .env file
+python-dotenv==1.0.1
+langchain-openai
+streamlit
