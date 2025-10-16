@@ -15,23 +15,27 @@ from src.utils.scraper import scrape_text_from_url
 # --- Helper functions ---
 
 def _domain_of(url: str) -> str:
+    """Extract domain name (e.g., 'apple.com')."""
     try:
         return urlparse(url).netloc.lower().replace("www.", "")
     except Exception:
         return ""
 
+
 def _extract_possible_brand(claim: str) -> Optional[str]:
     """
-    Simple heuristic: extract potential brand or product name from claim text.
+    Extracts a likely brand name from the claim text.
     Example: "Apple iPhone 15 has the best camera" → 'apple'
     """
     words = claim.split()
     for w in words:
-        if re.match(r"^[A-Z][a-z]+$", w):  # likely brand (capitalized single word)
+        if re.match(r"^[A-Z][a-z]+$", w):  # capitalized word → possible brand
             return w.lower()
     return None
 
+
 def _pick_best_result(results: List[dict], trusted_domains: Optional[List[str]]) -> Optional[str]:
+    """Choose best URL, preferring those from trusted/official domains."""
     if not results:
         return None
     trusted_set = {d.lower().replace("www.", "") for d in (trusted_domains or [])}
@@ -42,27 +46,31 @@ def _pick_best_result(results: List[dict], trusted_domains: Optional[List[str]])
         dom = _domain_of(url)
         if dom in trusted_set:
             return url
+    # fallback: pick first available URL
     for r in results:
-        url = r.get("url")
-        if url:
-            return url
+        if r.get("url"):
+            return r["url"]
     return None
 
+
 def _generate_search_query(claim: str, llm: ChatOpenAI) -> str:
+    """Use LLM to generate a focused web search query for this claim."""
     parser = StrOutputParser()
     prompt = ChatPromptTemplate.from_template(
-        "You are a search expert. Produce a short, focused search query to find authoritative specifications for this claim.\n\nClaim: {claim}\n\nRespond with only the search query."
+        "You are a search expert. Produce a short, focused query to verify this factual claim.\n\nClaim: {claim}\n\nReturn only the query."
     )
     chain = prompt | llm | parser
     return chain.invoke({"claim": claim}).strip()
 
-def _verify_with_llm(claim: str, source_text: str, llm: ChatOpenAI, force_yesno: bool = False) -> Optional[bool]:
+
+def _verify_with_llm(claim: str, source_text: str, llm: ChatOpenAI) -> Optional[bool]:
+    """Ask LLM to verify claim truth using the provided source text."""
     parser = StrOutputParser()
-    if force_yesno:
-        template = "You are a concise fact-checker. Given the Claim and the Source Text, answer ONLY 'Yes' or 'No'.\n\nClaim: {claim}\n\nSource Text: {source_text}\n"
-    else:
-        template = "You are a meticulous fact-checker. Analyze whether the Source Text confirms the Claim. Answer 'Yes' or 'No'.\n\nClaim: {claim}\n\nSource Text: {source_text}\n"
-    
+    template = (
+        "You are a meticulous fact-checker. Analyze if the Source Text confirms the Claim.\n"
+        "Respond only with 'Yes' or 'No'.\n\n"
+        "Claim: {claim}\n\nSource Text: {source_text}\n"
+    )
     prompt = ChatPromptTemplate.from_template(template)
     chain = prompt | llm | parser
     try:
@@ -70,61 +78,81 @@ def _verify_with_llm(claim: str, source_text: str, llm: ChatOpenAI, force_yesno:
     except Exception as e:
         print(f"LLM verification call failed: {e}")
         return None
-    
+
     r = resp.strip().lower()
-    if r.startswith("yes"): return True
-    if r.startswith("no"): return False
+    if r.startswith("yes"):
+        return True
+    if r.startswith("no"):
+        return False
     return None
 
 
 # --- Main verification pipeline ---
 
-def verify_claim(claim: str, trusted_domains: List[str] = None) -> Optional[str]:
+def verify_claim(claim: str, product_url: Optional[str] = None) -> Optional[str]:
+    """
+    Verifies a claim by:
+    1. Searching within the official domain first (if identifiable)
+    2. Falling back to global web search if needed
+    """
     llm = ChatOpenAI(model="gpt-4o", temperature=0)
     search_tool = TavilySearchResults(max_results=3)
 
     def _search_and_verify(query: str, preferred_domains: List[str] = None) -> Optional[str]:
+        """Search Tavily and verify claim using retrieved sources."""
         try:
             results = search_tool.invoke(query)
         except Exception as e:
             print(f"Tavily search error: {e}")
             return None
-        
+
         if not results or not isinstance(results, list):
             return None
 
         source_url = _pick_best_result(results, preferred_domains)
         if not source_url:
             return None
-        
+
         scraped_text = scrape_text_from_url(source_url)
         if not scraped_text:
             return None
-        
+
         verdict = _verify_with_llm(claim, scraped_text, llm)
         if verdict:
             return source_url
         return None
 
-    # Step 1: Try verifying from possible official site first
-    brand = _extract_possible_brand(claim)
-    if brand:
-        possible_domains = [f"{brand}.com", f"{brand}.in", f"{brand}.co", f"{brand}.org"]
-        for d in possible_domains:
-            official_url = f"https://{d}"
-            scraped_text = scrape_text_from_url(official_url)
-            if scraped_text:
-                verdict = _verify_with_llm(claim, scraped_text, llm)
-                if verdict:
-                    return official_url
+    # --- Step 1: Identify official domain from brand name or product URL ---
+    brand_domain = None
 
-    # Step 2: Tavily/Web verification fallback
-    if direct_result := _search_and_verify(claim, trusted_domains):
+    # Try to extract domain from provided product URL
+    if product_url:
+        brand_domain = _domain_of(product_url)
+
+    # Try heuristic extraction from brand name if URL missing
+    if not brand_domain:
+        brand = _extract_possible_brand(claim)
+        if brand:
+            brand_domain = f"{brand}.com"
+
+    # --- Step 2: Try verifying using official domain first ---
+    if brand_domain:
+        domain_query = f"site:{brand_domain} {claim}"
+        print(f" Trying official site search: {domain_query}")
+        official_result = _search_and_verify(domain_query, [brand_domain])
+        if official_result:
+            return official_result
+
+    # --- Step 3: Fallback — general web search ---
+    print(" Falling back to global web search.")
+    if direct_result := _search_and_verify(claim):
         return direct_result
-    
+
     try:
-        if smart_query := _generate_search_query(claim, llm):
-            if smart_result := _search_and_verify(smart_query, trusted_domains):
+        smart_query = _generate_search_query(claim, llm)
+        if smart_query:
+            smart_result = _search_and_verify(smart_query)
+            if smart_result:
                 return smart_result
     except Exception as e:
         print(f"Smart query generation failed: {e}")
@@ -135,6 +163,7 @@ def verify_claim(claim: str, trusted_domains: List[str] = None) -> Optional[str]
 # --- Async parallel version ---
 _executor = ThreadPoolExecutor(max_workers=5)
 
-async def async_verify_claim(claim: str, trusted_domains: list = None) -> Optional[str]:
+async def async_verify_claim(claim: str, product_url: Optional[str] = None) -> Optional[str]:
+    """Async wrapper to parallelize verification."""
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(_executor, verify_claim, claim, trusted_domains)
+    return await loop.run_in_executor(_executor, verify_claim, claim, product_url)

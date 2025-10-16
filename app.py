@@ -70,7 +70,8 @@ else:
                         claims_to_verify = all_claims
 
                     async def verify_all_claims_parallel(claims):
-                        tasks = [async_verify_claim(claim) for claim in claims]
+                        tasks = [async_verify_claim(claim, url_input) for claim in claims_to_verify]
+
                         return await asyncio.gather(*tasks)
 
                     with st.spinner(f"Verifying {len(claims_to_verify)} claims..."):
